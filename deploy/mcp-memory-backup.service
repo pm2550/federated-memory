@@ -1,0 +1,9 @@
+[Unit]
+Description=MCP Memory Server daily backup
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/mcp-memory-server/deploy/backup.sh
+StandardOutput=append:/var/log/mcp-memory-backup.log
+StandardError=append:/var/log/mcp-memory-backup.log

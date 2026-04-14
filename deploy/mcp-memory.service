@@ -1,0 +1,36 @@
+[Unit]
+Description=MCP Memory Server
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=mcp
+Group=mcp
+WorkingDirectory=/opt/mcp-memory-server
+EnvironmentFile=/opt/mcp-memory-server/.env
+
+# Go runtime tuning: soft memory target → aggressive GC under load.
+Environment="GOMEMLIMIT=300MiB"
+Environment="GOGC=50"
+
+ExecStart=/opt/mcp-memory-server/bin/memory-server
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+
+# Resource limits — protect the host on 1 GB RAM. MemoryMax is cgroup hard
+# limit; service gets OOM-killed and restarted if it exceeds this.
+MemoryMax=350M
+LimitNOFILE=65536
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/data/memory
+
+[Install]
+WantedBy=multi-user.target

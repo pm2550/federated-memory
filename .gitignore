@@ -1,0 +1,7 @@
+bin/
+.env
+testdata/
+__pycache__/
+*.pyc
+*.pem
+*.key
