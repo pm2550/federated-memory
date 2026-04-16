@@ -15,7 +15,7 @@
 #   6. Smoke-tests the connection and prints next-steps.
 set -euo pipefail
 
-URL="${MCP_URL:-http://YOUR_SERVER_IP:7444/mcp}"
+URL="${MCP_URL:-https://YOUR_SERVER_IP:7443/mcp}"
 TOKEN=""
 SYNC_TOKEN_ARG=""
 MACHINE=""
@@ -570,18 +570,27 @@ install_sync_scheduler() {
 
     case "$PLATFORM" in
         windows)
-            local py_win sync_win
+            local py_win sync_win vbs_path
             py_win="$(cygpath -w "$py" 2>/dev/null || echo "$py")"
             sync_win="$(cygpath -w "$SYNC_PY" 2>/dev/null || echo "$SYNC_PY")"
+            vbs_path="$HOOK_DIR/bin/sync-silent.vbs"
+            local vbs_win
+            vbs_win="$(cygpath -w "$vbs_path" 2>/dev/null || echo "$vbs_path")"
+
+            # Create a VBScript wrapper that runs sync silently (no cmd window popup)
+            cat > "$vbs_path" <<VBSEOF
+Set WshShell = CreateObject("WScript.Shell")
+WshShell.Run """$py_win"" ""$sync_win"" sync", 0, False
+VBSEOF
 
             # Remove any prior scheduled task (including old naming).
             schtasks.exe //Delete //TN "MemorySyncCodexScan" //F >/dev/null 2>&1 || true
             schtasks.exe //Delete //TN "$task_name"          //F >/dev/null 2>&1 || true
 
             if schtasks.exe //Create //SC MINUTE //MO "$INTERVAL" //TN "$task_name" \
-                //TR "\"$py_win\" \"$sync_win\" sync" \
+                //TR "wscript.exe \"$vbs_win\"" \
                 //RL LIMITED //F >/dev/null 2>&1; then
-                echo "[+] Windows task scheduled: $task_name (every $INTERVAL min)"
+                echo "[+] Windows task scheduled: $task_name (every $INTERVAL min, silent)"
             else
                 echo "[!] schtasks failed — run manually: $py_win $sync_win sync"
             fi

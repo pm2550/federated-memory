@@ -53,8 +53,9 @@ LOG_PATH = HOME / "sync.log"
 MANIFESTS_DIR = HOME / "manifests"
 STATE_DIR = HOME / "state"
 LOCK_PATH = HOME / "sync.lock"
+TRACKED_TXT = HOME / "tracked.txt"
 
-DEFAULT_URL = "http://YOUR_SERVER_IP:7444/mcp"
+DEFAULT_URL = "https://YOUR_SERVER_IP:7443/mcp"
 DEFAULT_TOKEN_ENV = "MCP_MEMORY_TOKEN"
 DEFAULT_MANIFEST_INTERVAL_MIN = 60
 DEFAULT_CODEX_SCAN_INTERVAL_MIN = 60
@@ -694,6 +695,90 @@ def sync_manifest_once(client: MCPClient, manifest: dict) -> dict:
     return stats
 
 
+def sync_tracked_txt(client: MCPClient, cfg: dict) -> None:
+    """Read ~/.memory-sync/tracked.txt and upload any files listed there.
+
+    Format: one local file path per line. # comments allowed. Empty lines skipped.
+    Paths starting with ~ are expanded. Backslashes normalized to forward slashes.
+
+    Workspace routing:
+      - If the path is inside a Claude project dir (~/.claude/projects/<slug>/...),
+        derive workspace from the slug.
+      - Otherwise, use config machine + "tracked" as the workspace repo_name.
+
+    Upload path on server: tracked/<filename> (flat, to avoid collisions
+    with auto/ and cwd/ namespaces).
+    """
+    if not TRACKED_TXT.exists():
+        return
+
+    lines = TRACKED_TXT.read_text(encoding="utf-8", errors="replace").splitlines()
+    entries: list[Path] = []
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        p = expand_user_path(line)
+        if p.is_file():
+            entries.append(p)
+        else:
+            log(f"tracked.txt: not found or not a file: {line}")
+
+    if not entries:
+        return
+
+    machine = cfg.get("machine") or default_machine_name()
+    uploaded = 0
+    skipped = 0
+    errors = 0
+
+    # Determine workspace for each file
+    claude_projects = Path.home() / ".claude" / "projects"
+
+    for local in entries:
+        # Try to match to a Claude project
+        local_str = str(local).replace("\\", "/")
+        claude_proj_str = str(claude_projects).replace("\\", "/")
+        ws_tool = "tracked"
+        ws_project = "default"
+
+        if local_str.startswith(claude_proj_str + "/"):
+            # Extract the project slug (first dir under projects/)
+            rel = local_str[len(claude_proj_str) + 1:]
+            proj_slug = rel.split("/")[0]
+            ws_tool = "claude-code"
+            # Check if manifest-based routing can find a better name
+            owner = _existing_manifest_tracking(
+                str(claude_projects / proj_slug / "memory").replace("\\", "/"))
+            if owner:
+                prefix = f"{slug(machine)}-claude-code-"
+                if owner.startswith(prefix):
+                    ws_project = owner[len(prefix):]
+                else:
+                    ws_project = _reverse_claude_slug(proj_slug)
+            else:
+                ws_project = _reverse_claude_slug(proj_slug)
+
+        ws_id = f"{slug(machine)}-{slug(ws_tool)}-{slug(ws_project)}"
+        ensure_workspace(client, cfg, machine, ws_tool, ws_project)
+
+        # Upload path: tracked/<filename>
+        upload_path = "tracked/" + local.name
+
+        ok, msg = upload_knowledge_file(client, ws_id, upload_path, local)
+        if ok:
+            uploaded += 1
+            log(f"tracked.txt: uploaded {local.name} -> {ws_id}/{upload_path}")
+        elif "already uploaded" in msg:
+            skipped += 1
+        else:
+            errors += 1
+            log(f"tracked.txt: failed {local.name}: {msg[:80]}")
+
+    if uploaded or errors:
+        log(f"tracked.txt: uploaded={uploaded} skipped={skipped} errors={errors}")
+
+
 def sync_all_manifests(client: MCPClient) -> list[dict]:
     results = []
     for m in load_manifests():
@@ -1060,7 +1145,13 @@ def cmd_sync(args) -> int:
         else:
             log("sync: no manifests found")
 
-        # 2. Codex session scan — reuse cmd_codex_scan logic inline
+        # 2. tracked.txt — AI-maintained list of extra files to sync
+        try:
+            sync_tracked_txt(client, cfg)
+        except Exception as e:
+            log(f"sync: tracked.txt failed: {e}")
+
+        # 3. Codex session scan — reuse cmd_codex_scan logic inline
         class _Codex:
             machine = None
             codex_home = None
@@ -1071,7 +1162,7 @@ def cmd_sync(args) -> int:
         except Exception as e:
             log(f"sync: codex scan failed: {e}")
 
-        # 3. Claude session scan — catches sessions the SessionEnd hook
+        # 4. Claude session scan — catches sessions the SessionEnd hook
         # missed (historical sessions, crashed runs, old Claude versions).
         class _Claude:
             machine = None

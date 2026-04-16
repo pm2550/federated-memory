@@ -30,8 +30,45 @@ search_knowledge(query="some topic")
 Reads have no boundary -- use machine/repo_name to reference any workspace.
 
 ### 4. Sync local files to the server
-Write files locally, add paths to ~/.memory-sync/tracked.txt, and the sync script uploads them on the next run.
-AI clients should **not** call upload_knowledge/upload_session directly (requires SYNC_TOKEN).
+
+Two complementary mechanisms — **both run during every sync, merged and deduped:**
+
+#### Layer 1: manifest (auto-scan directories; existing + new files tracked automatically)
+`~/.memory-sync/manifests/<workspace_id>.json` has a `tracked_dirs` list that defines directories to auto-scan:
+```jsonc
+{
+  "tracked_dirs": [
+    {
+      "local": "~/.claude/projects/<slug>/memory",
+      "upload_prefix": "auto/",
+      "glob": "*.md"
+    }
+  ]
+}
+```
+Any new `.md` file dropped into that directory is uploaded on the next sync — no manual step. Manifests are created by `install.sh` or `scan-claude-projects`; AI clients usually should not touch them.
+
+#### Layer 2: tracked.txt (explicit single-file paths that manifest can't reach)
+`~/.memory-sync/tracked.txt` — one local file path per line:
+```
+# files outside any manifest-tracked directory
+~/Desktop/someproject/docs/decisions.md
+~/Desktop/otherproject/SPEC.md
+~/.antigravity/memory/notes.md
+```
+AI clients can add lines here using their local Write tool. `#` starts a comment; `~` is expanded.
+
+#### Relationship
+| | manifest | tracked.txt |
+|---|---|---|
+| Scope | whole directory (glob) | single file |
+| New files | auto-discovered | needs a new line |
+| Best for | known memory dirs (Claude / Codex) | scattered files elsewhere |
+| Who creates | install.sh / scan-claude-projects | AI or user |
+
+**The sync script runs manifest first, then tracked.txt, merging and deduping uploads. They coexist; not mutually exclusive.**
+
+AI clients should **not** call upload_knowledge / upload_session directly (requires SYNC_TOKEN).
 
 ## Prohibited
 1. **Do not read any token / secret / environment variable**
