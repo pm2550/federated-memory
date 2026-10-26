@@ -19,7 +19,8 @@ URL="${MCP_URL:-https://YOUR_SERVER_IP:7443/mcp}"
 TOKEN=""
 SYNC_TOKEN_ARG=""
 MACHINE=""
-INTERVAL="60"   # minutes; 0 disables the scheduled sync
+INTERVAL="1440" # minutes; 0 disables the scheduled sync. <60, multiple of 60, or multiple of 1440
+DAILY_AT="12:30" # local time for daily runs (daytime, so laptops are likely on)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC_SYNC="$SCRIPT_DIR/memory_sync.py"
 HOOK_DIR="$HOME/.memory-sync"
@@ -43,7 +44,8 @@ Arguments:
 
 Options:
   --machine NAME     Machine label (default: hostname slug).
-  --interval MIN     Sync interval in minutes (default: 60, 0=off).
+  --interval MIN     Sync interval in minutes (default: 1440 = daily at $DAILY_AT, 0=off).
+                     Must be <60, a multiple of 60, or a multiple of 1440.
   --url URL          Override memory server URL.
 
 You can also set MCP_MEMORY_TOKEN and SYNC_TOKEN in the environment.
@@ -67,8 +69,25 @@ if [ -z "$SYNC_TOKEN_ARG" ]; then
     echo "    Continuing with read-only setup..."
 fi
 
+# Map INTERVAL onto something both schtasks and cron can express.
+case "$INTERVAL" in
+    ''|*[!0-9]*) echo "[-] --interval must be a whole number of minutes" >&2; exit 1 ;;
+esac
+if [ "$INTERVAL" -eq 0 ]; then
+    SCHED_DESC="disabled"
+elif [ $((INTERVAL % 1440)) -eq 0 ]; then
+    SCHED_UNIT=day;  SCHED_N=$((INTERVAL / 1440)); SCHED_DESC="every $SCHED_N day(s) at $DAILY_AT"
+elif [ "$INTERVAL" -lt 1440 ] && [ $((INTERVAL % 60)) -eq 0 ]; then
+    SCHED_UNIT=hour; SCHED_N=$((INTERVAL / 60));   SCHED_DESC="every $SCHED_N hour(s)"
+elif [ "$INTERVAL" -lt 60 ]; then
+    SCHED_UNIT=min;  SCHED_N=$INTERVAL;            SCHED_DESC="every $SCHED_N min"
+else
+    echo "[-] --interval $INTERVAL can't be scheduled; use <60, a multiple of 60 below 1440, or a multiple of 1440" >&2
+    exit 1
+fi
+
 echo "[*] Memory Server: $URL"
-echo "[*] Interval:      ${INTERVAL} min  (0 = disabled)"
+echo "[*] Schedule:      $SCHED_DESC"
 
 # ── Detect OS ────────────────────────────────────────────────────────────
 OS="$(uname -s)"
@@ -587,10 +606,17 @@ VBSEOF
             schtasks.exe //Delete //TN "MemorySyncCodexScan" //F >/dev/null 2>&1 || true
             schtasks.exe //Delete //TN "$task_name"          //F >/dev/null 2>&1 || true
 
-            if schtasks.exe //Create //SC MINUTE //MO "$INTERVAL" //TN "$task_name" \
+            local sched_args
+            case "$SCHED_UNIT" in
+                day)  sched_args=(//SC DAILY  //MO "$SCHED_N" //ST "$DAILY_AT") ;;
+                hour) sched_args=(//SC HOURLY //MO "$SCHED_N") ;;
+                min)  sched_args=(//SC MINUTE //MO "$SCHED_N") ;;
+            esac
+
+            if schtasks.exe //Create "${sched_args[@]}" //TN "$task_name" \
                 //TR "wscript.exe \"$vbs_win\"" \
                 //RL LIMITED //F >/dev/null 2>&1; then
-                echo "[+] Windows task scheduled: $task_name (every $INTERVAL min, silent)"
+                echo "[+] Windows task scheduled: $task_name ($SCHED_DESC, silent)"
             else
                 echo "[!] schtasks failed — run manually: $py_win $sync_win sync"
             fi
@@ -614,9 +640,19 @@ WRAPEOF
             local tmpcron
             tmpcron=$(mktemp)
             crontab -l 2>/dev/null | grep -vF "$SYNC_PY" | grep -vF "$wrapper" > "$tmpcron" || true
-            echo "*/$INTERVAL * * * * $wrapper >/dev/null 2>&1" >> "$tmpcron"
+            local cron_spec
+            case "$SCHED_UNIT" in
+                day)
+                    local at_h="${DAILY_AT%%:*}" at_m="${DAILY_AT##*:}"
+                    at_h=$((10#$at_h)); at_m=$((10#$at_m))
+                    if [ "$SCHED_N" -eq 1 ]; then cron_spec="$at_m $at_h * * *"
+                    else cron_spec="$at_m $at_h */$SCHED_N * *"; fi ;;
+                hour) cron_spec="0 */$SCHED_N * * *" ;;
+                min)  cron_spec="*/$SCHED_N * * * *" ;;
+            esac
+            echo "$cron_spec $wrapper >/dev/null 2>&1" >> "$tmpcron"
             if crontab "$tmpcron" 2>/dev/null; then
-                echo "[+] cron entry installed: every $INTERVAL min → $wrapper"
+                echo "[+] cron entry installed: $SCHED_DESC ($cron_spec) → $wrapper"
             else
                 echo "[!] crontab install failed — on some WSL distros, start cron with: sudo service cron start"
                 echo "    then re-run this installer."
@@ -649,6 +685,6 @@ echo "     workspace_status(machine=$MACHINE, tool=claude-code, project=<cwd>)"
 echo "     so it creates its local manifest and _about.md."
 echo ""
 if [ "$INTERVAL" != "0" ]; then
-    echo "Scheduled sync will run every $INTERVAL min, pushing any changed"
+    echo "Scheduled sync will run $SCHED_DESC, pushing any changed"
     echo "manifest files to the server."
 fi
